@@ -1076,14 +1076,14 @@ async function updateActuals() {
   if (!e0 || !state.days) return false;
   const today = state.days[0].date;
   const need = Object.keys(e0.days).filter(dt => dt < today && !e0.days[dt].a &&
-    Object.keys(e0.days[dt].f).some(l => +l >= 1)).sort();
-  if (!need.length) return false;
+    Object.keys(e0.days[dt].f).length).sort();
+  if (!need.length) { state.accStatus = 'nichts nachzuladen'; return true; }
   const params = new URLSearchParams({ latitude: state.lat, longitude: state.lon, daily: DAILY_PARAMS,
     timezone: 'auto', start_date: need[0], end_date: need[need.length - 1] });
   const res = await fetch(`${OPEN_METEO_URL}?${params}`);
-  if (!res.ok) return false;
+  if (!res.ok) { state.accStatus = 'Abruf der Messwerte fehlgeschlagen (HTTP ' + res.status + ')'; return true; }
   const dl = (await res.json()).daily;
-  if (!dl || !dl.time) return false;
+  if (!dl || !dl.time) { state.accStatus = 'Abruf ohne Daten'; return true; }
   const h = loadHist(), e = h[key];
   if (!e) return false;
   let changed = false;
@@ -1094,8 +1094,9 @@ async function updateActuals() {
       changed = true;
     }
   });
+  state.accStatus = changed ? 'Messwerte geladen' : 'keine Messwerte erhalten';
   if (changed) saveHist(h);
-  return changed;
+  return true;
 }
 
 function scoreDay(f, a) {
@@ -1106,6 +1107,20 @@ function scoreDay(f, a) {
 }
 const scoreCls = v => v >= 80 ? 's-good' : v >= 60 ? 's-mid' : 's-bad';
 
+function accDiag() {
+  const all = loadHist(), others = Object.keys(all).filter(k => k !== locKey())
+    .map(k => `${all[k].name || k} (${Object.keys(all[k].days).length} Tage)`);
+  const tail = others.length ? ' · Andere Standorte: ' + others.join(', ') : '';
+  return accDiag0() + tail;
+}
+function accDiag0() {
+  const e = loadHist()[locKey()];
+  if (!e) return 'Noch nichts gespeichert (Speicher: ' + (function () { try { localStorage.setItem('t', '1'); localStorage.removeItem('t'); return 'ok'; } catch (x) { return 'gesperrt'; } })() + ')';
+  const ds = Object.keys(e.days), lead = {};
+  ds.forEach(d => Object.keys(e.days[d].f).forEach(l => { lead[l] = (lead[l] || 0) + 1; }));
+  return `${ds.length} Tage gespeichert (${ds[0]} bis ${ds[ds.length - 1]}), davon ${ds.filter(d => e.days[d].a).length} mit Messwerten · Prognosen je Vorlauf: ` +
+    Object.keys(lead).sort().map(l => l + ' Tg: ' + lead[l]).join(', ') + (state.accStatus ? ' · Status: ' + state.accStatus : '');
+}
 function accRows() {
   const e = loadHist()[locKey()], L = String(state.accLead);
   if (!e) return [];
@@ -1118,14 +1133,18 @@ function accRows() {
 function renderAccuracy() {
   const box = document.getElementById('acc');
   if (!box) return;
-  const rows = accRows();
+  let rows = accRows();
+  if (!rows.length && !state.accUser) {
+    for (const l of [0, 3, 5]) { state.accLead = l; rows = accRows(); if (rows.length) break; }
+    if (!rows.length) state.accLead = 1;
+  }
   state.accRows = rows;
-  const tabs = [1, 3, 5].map(l =>
-    `<button class="tab${l === state.accLead ? ' active' : ''}" data-lead="${l}">${l} ${l === 1 ? 'Tag' : 'Tage'} vorher</button>`).join('');
+  const tabs = [0, 1, 3, 5].map(l =>
+    `<button class="tab${l === state.accLead ? ' active' : ''}" data-lead="${l}">${l === 0 ? 'Am selben Tag' : l + (l === 1 ? ' Tag' : ' Tage') + ' vorher'}</button>`).join('');
   let body;
   if (!rows.length) {
     const e = loadHist()[locKey()], nd = e ? Object.keys(e.days).length : 0;
-    body = `<p class="hint" style="margin:14px 0;line-height:1.5">Noch keine Vergleichsdaten für diesen Vorlauf. Die App speichert bei jedem Öffnen die Vorhersage auf diesem Gerät und vergleicht sie später mit dem tatsächlichen Wetter. Bisher gespeichert: ${nd} Tage. Erste Ergebnisse für „1 Tag vorher“ gibt es ab morgen, bei längeren Vorläufen entsprechend später.</p>`;
+    body = `<p class="hint" style="margin:14px 0;line-height:1.5">Noch keine Vergleichsdaten für diesen Vorlauf. Die App speichert bei jedem Öffnen die Vorhersage auf diesem Gerät und vergleicht sie später mit dem tatsächlichen Wetter. Bisher gespeichert: ${nd} Tage. Erste Ergebnisse für „Am selben Tag“ gibt es ab morgen, für „1 Tag vorher“ ab übermorgen, bei längeren Vorläufen entsprechend später. Dafür die App an diesen Tagen jeweils kurz öffnen.</p><p class="hint" style="margin:0 0 8px">Diagnose: ${accDiag()}</p>`;
   } else {
     const aS = avg(rows.map(r => r.s));
     const eX = avg(rows.map(r => Math.abs(r.f.tx - r.a.tx)));
@@ -1157,7 +1176,7 @@ function renderAccuracy() {
     ${body}
     <div class="acc-foot"><span>Bewertung: Höchst-/Tiefstwert (±5° = 0 Punkte) und Regenwahrscheinlichkeit. Daten bleiben lokal auf diesem Gerät.</span><button class="link-btn" id="accClear">Daten löschen</button></div>`;
   box.querySelectorAll('[data-lead]').forEach(b => b.addEventListener('click', () => {
-    state.accLead = +b.dataset.lead; renderAccuracy();
+    state.accLead = +b.dataset.lead; state.accUser = true; renderAccuracy();
   }));
   document.getElementById('accClear').addEventListener('click', () => {
     if (confirm('Alle gespeicherten Prognosen und Vergleichsdaten auf diesem Gerät löschen?')) {
@@ -1253,7 +1272,7 @@ async function loadWeather() {
     state.updatedAt = new Date();
     saveLoc();
     render(forecast, extras);
-    updateActuals().then(ch => { if (ch) renderAccuracy(); }).catch(() => {});
+    updateActuals().then(ch => { if (ch) renderAccuracy(); }).catch(err => { state.accStatus = 'Fehler: ' + (err && err.message || err); renderAccuracy(); });
   } catch (err) {
     renderError(err.message || 'Unbekannter Fehler.');
   }
